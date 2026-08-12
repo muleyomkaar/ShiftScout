@@ -1,0 +1,553 @@
+SHIFTSCOUT PROJECT EXPLANATION
+==============================
+
+1. PROJECT OVERVIEW
+-------------------
+
+ShiftScout is a basic job-hunting portal written entirely in Python. It allows a
+user to enter personal information, paste or import CV text, search for jobs,
+receive ranked recommendations, generate an application note, and keep a local
+list of interesting jobs.
+
+The project uses only modules included with Python. No pip installation, paid
+AI service, or API key is required.
+
+Main technologies:
+
+* tkinter and tkinter.ttk: graphical desktop interface
+* sqlite3: local profile and application storage
+* urllib.request: optional retrieval of live jobs
+* threading: keeps the interface responsive during network requests
+* json: reads responses from the live job feed
+* re: extracts and compares keywords
+* dataclasses: represents the user's profile cleanly
+* unittest: automated tests
+
+The word "agent" in this MVP describes a transparent, rule-based workflow. It
+does not use a large language model. The agent performs several connected steps:
+
+1. Understand the user's goal and skills.
+2. Create a search plan.
+3. Retrieve available jobs.
+4. Score jobs against the user's profile.
+5. Explain each score.
+6. Help the user prepare and track an application.
+
+This design is intentionally simple, explainable, free to run, and easy to
+extend later with a real AI model or additional job sources.
+
+
+2. PROJECT FILES
+----------------
+
+app.py
+    Contains the complete application: models, database operations, job agent,
+    graphical interface, live-job retrieval, and startup code.
+
+test_app.py
+    Contains automated unit tests for matching, profile storage, and application
+    note generation.
+
+README.md
+    Contains short setup and usage instructions.
+
+PROJECT_EXPLANATION.txt
+    Contains this detailed explanation of the code and program logic.
+
+shiftscout.db
+    Created automatically the first time the program starts. This SQLite file
+    stores the profile and tracked jobs locally. It is not necessary to create
+    it manually.
+
+
+3. HOW TO RUN THE PROJECT
+-------------------------
+
+Requirements:
+
+* Python 3.10 or newer is recommended.
+* Python must include Tkinter. Standard Windows Python installations normally do.
+* Internet access is optional.
+
+From the project directory, run:
+
+    python app.py
+
+To run the automated tests, use:
+
+    python -m unittest -v
+
+If the "python" command is not recognized, install Python from python.org and
+select the installer option that adds Python to PATH.
+
+
+4. OVERALL PROGRAM FLOW
+-----------------------
+
+When app.py runs, this statement at the bottom starts the portal:
+
+    App().mainloop()
+
+App() creates the graphical window and all required helper objects. mainloop()
+starts Tkinter's event loop, which waits for actions such as button clicks.
+
+The normal user journey is:
+
+1. The user enters a name, email, location, desired role, skills, and CV text.
+2. The user saves the profile or clicks "Run job agent."
+3. The form is validated and stored in SQLite.
+4. JobAgent creates a readable search plan.
+5. The application downloads live jobs or uses the demo catalogue.
+6. JobAgent scores and sorts the jobs.
+7. The interface displays the highest-scoring jobs first.
+8. Selecting a job displays its score, explanation, URL, and description.
+9. The user can track the job or generate an application note.
+
+The portal does not submit real job applications. The user stays in control and
+must review every vacancy and application before taking action.
+
+
+5. IMPORTS AND CONSTANTS
+------------------------
+
+The imports at the beginning of app.py provide all supporting functionality.
+
+DB_PATH
+    Points to shiftscout.db in the same directory as app.py. Using __file__
+    makes the database location reliable even if the program is launched from
+    another working directory.
+
+KNOWN_SKILLS
+    A Python set of common skills such as Python, SQL, Docker, customer service,
+    and project management. The agent looks for these phrases in the user's
+    skills field and CV.
+
+DEMO_JOBS
+    A list of dictionaries containing sample jobs. Each dictionary has a title,
+    company, location, remote flag, description, and URL. Demo jobs make the
+    project usable without internet access and make its behavior easy to test.
+
+In production, the known skills list could be expanded, loaded from a file, or
+replaced by an NLP or embedding model.
+
+
+6. TEXT CLEANING
+----------------
+
+Function: clean_text(value)
+
+Live job descriptions can contain HTML tags and escaped characters. clean_text:
+
+1. Converts escaped HTML text into normal characters using html.unescape.
+2. Removes HTML tags using a regular expression.
+3. Replaces repeated whitespace with a single space.
+4. Removes whitespace at the beginning and end.
+
+This produces readable text and improves keyword matching.
+
+
+7. THE PROFILE DATA MODEL
+-------------------------
+
+Class: Profile
+
+Profile is a dataclass. A dataclass is a concise way to create an object whose
+main purpose is storing related data.
+
+Profile fields:
+
+* name: candidate's full name
+* email: candidate's email address
+* location: preferred or current location
+* desired_role: type of job the candidate wants
+* skills: comma-separated skills entered manually
+* cv_text: pasted or imported CV content
+* remote_only: True when only remote work should be considered
+
+Using one Profile object instead of passing seven unrelated values makes the
+rest of the code easier to read and extend.
+
+
+8. LOCAL DATABASE LOGIC
+-----------------------
+
+Class: Store
+
+Store owns all SQLite operations. Keeping database code in one class separates
+data storage from job matching and interface code.
+
+Store.__init__(path)
+    Opens a SQLite connection. By default it uses shiftscout.db. Tests can pass
+    a temporary database path instead.
+
+    check_same_thread=False allows the connection to exist alongside the search
+    worker thread. In this project, writes are still performed through simple,
+    short methods.
+
+    Two tables are created if they do not already exist.
+
+Profile table:
+
+    profile(
+        id INTEGER PRIMARY KEY CHECK(id=1),
+        name TEXT,
+        email TEXT,
+        location TEXT,
+        desired_role TEXT,
+        skills TEXT,
+        cv_text TEXT,
+        remote_only INTEGER
+    )
+
+The CHECK(id=1) design means the app stores one current profile. SQLite has no
+separate Boolean storage class, so remote_only is saved as 0 or 1.
+
+Applications table:
+
+    applications(
+        id INTEGER PRIMARY KEY,
+        title TEXT,
+        company TEXT,
+        url TEXT,
+        status TEXT,
+        created_at TEXT
+    )
+
+Each tracked job receives its own automatically generated ID.
+
+Store.save_profile(profile)
+    Uses INSERT OR REPLACE with ID 1. Saving again replaces the previous profile.
+    Parameter placeholders (?) keep values separate from SQL and prevent SQL
+    injection caused by form text. commit() permanently saves the transaction.
+
+Store.load_profile()
+    Reads the single profile row. It returns a Profile object when data exists or
+    None on the first run. The stored 0 or 1 is converted back to bool.
+
+Store.track(job)
+    Inserts a selected job in the applications table with status "Interested"
+    and the current local date and time.
+
+Store.applications()
+    Retrieves applications in reverse ID order, so the newest appears first.
+
+All personal information stays in the local database. The program does not send
+the user's name, email, or CV to the live job source.
+
+
+9. THE RULE-BASED JOB AGENT
+---------------------------
+
+Class: JobAgent
+
+JobAgent contains the project's agentic workflow. It has no user-interface code
+and no database dependency, which makes it easy to test.
+
+9.1 Skill extraction: infer_skills(profile)
+
+The method combines the manually entered skills and CV text, then converts the
+result to lowercase. It checks whether each KNOWN_SKILLS phrase appears as a
+complete term. It also adds every comma-separated skill entered by the user.
+
+A set removes duplicates. The final result is sorted for predictable output.
+
+Example:
+
+    Skills field: Python, SQL
+    CV text: Built Flask applications using Git
+    Result: flask, git, python, sql
+
+This is keyword extraction rather than generative AI. It is deterministic: the
+same profile always produces the same skills.
+
+9.2 Planning: plan(profile)
+
+The plan method turns profile information into a short readable plan. It selects
+the desired role as the search focus. If there is no desired role, it uses an
+inferred skill or the word "general." It also applies the user's remote or
+location preference.
+
+The output explains the goal, the signals used for ranking, and the steps the
+agent will perform. Showing the plan makes the agent's behavior transparent.
+
+9.3 Job retrieval: fetch(live)
+
+When live is False, fetch immediately returns DEMO_JOBS.
+
+When live is True, it sends an HTTP GET request to the public Arbeitnow job-board
+API. The request includes a ShiftScout user-agent header and has a ten-second
+timeout. json.load converts the response from JSON into Python objects.
+
+Every external job is converted into the same internal dictionary structure as
+the demo jobs. This normalization means the ranking and interface code do not
+need to know where a job came from.
+
+If any network, timeout, parsing, or service error occurs, the broad exception
+handler returns DEMO_JOBS. The status message reports that the live feed was
+unavailable and names the error type. This graceful fallback keeps the portal
+working offline.
+
+9.4 Matching and ranking: rank(profile, jobs)
+
+The rank method is the core recommendation algorithm.
+
+First it obtains inferred skills. It also extracts words from desired_role with
+a regular expression. For each job, it combines the job title and description
+into lowercase text.
+
+The score is calculated as follows:
+
+* 15 points for every candidate skill found in the job text
+* 18 points for every desired-role term found in the job text
+* 15 additional points when the user requests remote work and the job is remote
+* 40 points removed when the user requests remote work but the job is not remote
+* 10 points when the user's location appears in the job location
+
+The final score is limited to the range 0 to 100.
+
+For example, if a job matches Python and SQL and one role word, its base score is:
+
+    (2 skills x 15) + (1 role word x 18) = 48
+
+The method also builds a plain-language reason such as:
+
+    role alignment: developer; skill matches: python, sql; remote preference
+
+Jobs are sorted by score from highest to lowest. This is an explainable ranking
+system, but it is not a statistical probability. A score of 80 means strong
+keyword alignment under these rules, not an 80 percent chance of being hired.
+
+9.5 Application note: application_note(profile, job)
+
+This method identifies up to four profile skills that also occur in the selected
+job description. It inserts those skills, the job title, company, candidate name,
+and email into a short application message.
+
+If no skills overlap, it uses a general transferable-skills sentence. The note
+is a starting draft and should always be reviewed and personalized by the user.
+
+
+10. THE GRAPHICAL INTERFACE
+---------------------------
+
+Class: App(tk.Tk)
+
+App inherits from Tk, so an App object is the main desktop window.
+
+App.__init__()
+    Configures the title, initial size, and minimum size. It creates Store and
+    JobAgent objects and initializes the job-results list.
+
+    Tkinter variables connect form controls to Python values:
+
+    * StringVar for text fields
+    * BooleanVar for checkboxes
+    * StringVar for the status message
+
+    __init__ then calls _build() to create widgets and _load() to restore saved
+    profile and application data.
+
+10.1 Tabs
+
+The ttk.Notebook contains three tabs.
+
+My profile:
+    Contains entries for name, email, location, desired role, and skills; a large
+    text box for CV content; a remote-only checkbox; and import/save buttons.
+
+Find jobs:
+    Contains the live-jobs checkbox, agent button, current status, agent plan,
+    ranked result table, selected-job details, and action buttons.
+
+Tracker:
+    Displays locally tracked applications and includes a refresh button.
+
+Grid weights and pack expansion allow important widgets to grow when the window
+is resized.
+
+10.2 Reading and saving the form
+
+App.profile()
+    Reads every form control and creates a Profile object. strip() removes extra
+    leading and trailing whitespace.
+
+App.save(quiet=False)
+    Checks that name and email are present and that the email contains an @ sign.
+    It displays a warning and returns False when validation fails. Otherwise it
+    saves the profile and returns True. quiet=True avoids an extra success dialog
+    when saving automatically before a search.
+
+This is intentionally basic email validation. A production app could use a more
+complete validator, although it should still avoid rejecting valid unusual email
+addresses.
+
+App._load()
+    Loads saved profile values into the form when the application starts. It also
+    refreshes the application tracker.
+
+10.3 Importing a CV
+
+App.import_cv()
+    Opens a file-selection dialog. The current version is designed for text CVs.
+    It reads the chosen file as UTF-8 and replaces invalid bytes safely. An error
+    dialog appears if the file cannot be read.
+
+PDF and DOCX parsing are not included because the goal is to use only Python's
+standard library. Users can copy text from those files and paste it into the CV
+box. Third-party parsers could be added later.
+
+10.4 Running a search without freezing the interface
+
+App.search()
+    Saves and validates the current profile, displays the agent plan, changes the
+    status message, and starts a background thread.
+
+App._search_worker(profile)
+    Retrieves and ranks jobs in the background. Network access can take several
+    seconds, so doing this work on Tkinter's main thread would freeze the window.
+
+    Tkinter widgets should be changed only from the main interface thread.
+    Therefore, self.after(0, ...) schedules _show_results to run safely there.
+
+App._show_results(jobs, source)
+    Stores results, clears old table rows, inserts up to 100 ranked jobs, and
+    updates the source/status label.
+
+10.5 Selecting and acting on a job
+
+App.selected()
+    Converts the selected table row ID into an index in self.jobs. It returns the
+    corresponding job or None if no row is selected.
+
+App.show_job()
+    Runs when the table selection changes. It displays the job, company, score,
+    reason, URL, and a shortened description.
+
+App.track()
+    Requires a selected job, saves it through Store.track(), refreshes the
+    tracker, and displays confirmation.
+
+App.note()
+    Requires a selected job, calls JobAgent.application_note(), and opens a new
+    editable window containing the generated draft.
+
+App.refresh_tracker()
+    Clears the tracker table and reloads its rows from SQLite.
+
+
+11. TESTS
+---------
+
+test_app.py uses Python's unittest module.
+
+ShiftScoutTests.setUp()
+    Creates one reusable example profile before every test.
+
+test_agent_ranks_relevant_job_first()
+    Confirms that a profile requesting Python development ranks the demo Python
+    developer role first and gives it a positive score.
+
+test_profile_round_trip()
+    Creates a temporary directory and SQLite database, saves the profile, loads
+    it, and verifies that the result is identical. The temporary files are
+    automatically removed after the test.
+
+test_note_contains_identity_and_job()
+    Confirms that a generated note includes both the user's name and the selected
+    job title.
+
+These tests focus on logic that can run without opening the graphical interface
+or accessing the internet. More tests could cover remote filtering, location
+bonuses, missing details, duplicate tracking, and mocked network responses.
+
+
+12. PRIVACY, SECURITY, AND LIMITATIONS
+--------------------------------------
+
+Privacy:
+
+* Profile and tracked-job information are stored locally in shiftscout.db.
+* The live request retrieves public jobs and does not include the CV or email.
+* Anyone with access to the database file may be able to read its content.
+* SQLite data is not encrypted by this project.
+
+Security:
+
+* Database values use SQL parameters instead of string-built SQL.
+* The HTTP request uses HTTPS and a timeout.
+* Job descriptions are treated as text, not executed as Python or HTML.
+* The app does not automatically apply, email employers, or open job URLs.
+
+Current limitations:
+
+* Keyword scoring cannot understand context, seniority, synonyms, or negation.
+* The live API may be unavailable or may not contain jobs for every country.
+* The application reads text CV files, not PDF or DOCX files.
+* Only one candidate profile is stored.
+* Tracking status is initially fixed to "Interested."
+* Duplicate jobs can be added to the tracker.
+* Generated notes are templates rather than LLM-written letters.
+* The match percentage is a normalized rule score, not a hiring prediction.
+
+
+13. IDEAS FOR EXTENDING THE PROJECT
+-----------------------------------
+
+Beginner-friendly extensions:
+
+* Add buttons to change tracker status to Applied, Interview, Offer, or Rejected.
+* Add delete and edit actions for tracked jobs.
+* Prevent duplicate tracking by making the URL unique.
+* Add filters for minimum score, company, location, and keywords.
+* Export tracked jobs to CSV using Python's csv module.
+* Add pagination and show more than 100 results.
+* Add a button that opens the selected URL with webbrowser.open().
+
+Intermediate extensions:
+
+* Move Store, JobAgent, and App into separate modules.
+* Add configuration and logging modules.
+* Support several job APIs behind a common provider interface.
+* Cache downloaded jobs in SQLite.
+* Add database migrations and multiple user profiles.
+* Parse PDF and DOCX CV files with optional third-party packages.
+* Improve tokenization, synonyms, skill weighting, and experience-level matching.
+* Build a browser interface with a Python framework such as Flask or Django.
+
+AI extensions:
+
+* Call a language model to extract structured experience from a CV.
+* Use embeddings to compare semantic meaning instead of exact keywords.
+* Generate customized cover letters using evidence from the CV.
+* Add an agent that periodically checks several approved job sources.
+* Let the agent suggest profile improvements and missing skills.
+
+Any AI extension should protect personal data, show what information is being
+sent to an external service, obtain user consent, and require review before an
+application is submitted.
+
+
+14. DESIGN SUMMARY
+------------------
+
+ShiftScout follows a simple separation of concerns:
+
+    Profile       represents candidate data
+         |
+         v
+    Store         saves and retrieves local data
+         |
+         v
+    JobAgent      plans, retrieves, ranks, and explains jobs
+         |
+         v
+    App           presents everything through Tkinter
+
+This structure keeps the project approachable while demonstrating useful ideas:
+data modeling, persistent storage, API access, offline fallback, background work,
+explainable recommendations, input validation, automated tests, and a complete
+event-driven desktop workflow.
+
+The most important principle is that the agent assists the user rather than
+acting without supervision. It recommends and drafts; the user reviews and makes
+the final decision.
